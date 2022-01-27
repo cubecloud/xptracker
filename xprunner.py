@@ -11,6 +11,8 @@ import logging
 import IPython
 from dataclasses import dataclass
 from abc import abstractmethod
+import optuna
+
 
 __keras_tuner__ = False
 __project_name__ = 'xptracker'
@@ -155,7 +157,7 @@ class EnvVM:
     """ Environment to create object to run"""
 
     def __init__(self,
-                 run_object_name='TrainNN'):
+                 run_object_name='XPRun'):
         self.run_object_name = run_object_name
         pass
 
@@ -255,8 +257,6 @@ class Runner:
         self.__check_create(XPConfig.done_dir)
         self.__check_create(XPConfig.work_dir)
         self.__check_create(XPConfig.semaphore_dir)
-
-
         pass
 
     def _set_logging(self, verbose):
