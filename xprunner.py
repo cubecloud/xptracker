@@ -11,6 +11,10 @@ import logging
 import IPython
 from dataclasses import dataclass
 from abc import abstractmethod
+from objrun import ObjectRunner
+import importlib.util
+import importlib.machinery
+from distutils.dir_util import copy_tree
 import optuna
 
 
@@ -32,6 +36,7 @@ def prepare_dev_stationary():
     except NameError:
         print('Running on local environment')
         DEV = os.getcwd()
+        DEV_DATA = os.path.join(DEV, __data_dir__)
     else:
         if 'google.colab' in test_ipython:
             print('Running on CoLab')
@@ -41,21 +46,14 @@ def prepare_dev_stationary():
                 cmd = "pip install -U keras-tuner"
                 os.system(cmd)
             DEV = os.path.join('/content/drive/MyDrive/Python/', __project_name__)
+            path_head = os.path.split(DEV)[0]
+            DEV_DATA = os.path.join(path_head, __data_dir__)
         elif 'ipykernel' in test_ipython:
             print('Running on Jupyter Notebook')
             DEV = os.getcwd()
+            DEV_DATA = os.path.join(DEV, __data_dir__)
     sys.path.append(DEV)
-    path_head = os.path.split(DEV)[0]
-    DEV_DATA = os.path.join(path_head, __data_dir__)
     pass
-
-
-prepare_dev_stationary()
-
-
-random.seed(42)
-
-logger = logging.getLogger(__name__)
 
 
 def get_local_timezone_name():
@@ -70,7 +68,14 @@ def get_local_timezone_name():
     return f'Etc/GMT{offset_hour_msg}'
 
 
+prepare_dev_stationary()
+
 TIMEZONE = pytz.timezone(get_local_timezone_name())
+
+random.seed(42)
+
+logger = logging.getLogger(__name__)
+
 
 
 @dataclass()
@@ -84,7 +89,8 @@ class XPConfig:
 
 
 class SignalMan(object):
-    signal_id = uuid.uuid1(uuid.getnode())
+    node = uuid.getnode()   #136411537670088
+    signal_id = uuid.uuid1(node=node, clock_seq=4115)
 
     def __init__(self,
                  sleep_time_range=(25, 90)):
@@ -94,6 +100,7 @@ class SignalMan(object):
         self.sleep_time_range = sleep_time_range
         self.sleep_time: int = self.get_sleep_time()
         print(self.id)
+        print(self.__class__.node)
         self.__check_crashed_flags()
 
     def __check_crashed_flags(self):
@@ -155,17 +162,81 @@ class SignalMan(object):
 
 class EnvVM:
     """ Environment to create object to run"""
-
     def __init__(self,
                  run_object_name='XPRun'):
+        self.run_module_name: object = None
         self.run_object_name = run_object_name
+        self.job_path_dir: str = ''
+        self.run_file_name: str = ''
+
         pass
 
-    def __setup(self):
+    def __get_run_file_name(self) -> str:
+        dir_list = os.listdir(self.job_path_dir)
+        pynames_list = []
+        for fname in dir_list:
+            if fname.endswith('.py'):
+                if fname.endswith('run.py'):
+                    pynames_list = [fname]
+                    run_file_name = fname
+                    break
+                pynames_list.append(fname)
+        if pynames_list:
+            if len(pynames_list) == 1:
+                run_file_name = pynames_list[0]
+            elif len(pynames_list) > 1:
+                logger.error(f"Can't find any *run.py file in job directory or more than one *.py to run")
+                sys.exit(40)    # 40 - error exit code
+        logger.info(f"Job #{self.job_path_dir} - {run_file_name} run file")
+        return run_file_name
+
+    # def __import_module(self):
+    #     # Import mymodule
+    #     loader = importlib.machinery.SourceFileLoader('mymodule', '/alpha/beta/mymodule')
+    #     spec = importlib.util.spec_from_loader('mymodule', loader)
+    #     mymodule = importlib.util.module_from_spec(spec)
+    #     loader.exec_module(mymodule)
+
+
+    def setup(self, job_path_dir):
+        self.job_path_dir = job_path_dir
+        sys.path.append(self.job_path_dir)
+
+        # module = importlib.import_module(f'{self.job_path_dir}.{file_name}')
+        # my_class = getattr(module, 'ObjTest')
+        # my_instance = my_class()
+
+        # spec = importlib.util.spec_from_file_location("test", path_filename)
+        # foo = importlib.util.module_from_spec(spec)
+        # spec.loader.exec_module(foo)
+        # foo.MyClass()
+
+        # self.spec = importlib.util.spec_from_file_location(file_name, self.job_path_dir)
+        # x = importlib.util.module_from_spec(self.spec)
+        # self.spec.loader.exec_module(x)
+        # print(dir(foo))
         pass
 
-    def run(self, job_dir):
+    def __import_job(self):
+        file_name = self.__get_run_file_name().split('.')[0]
+        path_filename = self.__get_run_file_name()
+        # Import mymodule
+        self.loader = importlib.machinery.SourceFileLoader(file_name, self.job_path_dir)
+        # self.loader = importlib.machinery.SourceFileLoader(file_name, '/home/cubecloud/Python/projects/xptracker/test')
+
+        self.spec = importlib.util.spec_from_loader(file_name, self.loader)
+        self.mymodule = importlib.util.module_from_spec(self.spec)
+        # time.sleep(20)
+        self.loader.exec_module(self.mymodule)
+
+    def run(self):
+        self.__import_job()
         pass
+
+    def reset(self):
+        sys.path.remove(self.job_path_dir)
+        self.job_path_dir: str = ''
+        self.run_file_name: str = ''
 
 
 class JobRunner:
@@ -192,8 +263,23 @@ class JobRunner:
             return False
 
     def __copy_job_to_work_dir(self):
-        shutil.copytree(os.path.join(XPConfig.queue_dir, self.job_dir), XPConfig.work_dir)
+        def _logpath(path, names):
+            logger.info('Working in %s' % path)
+            return []  # nothing will be ignored
+
+        self.new_job_dir = self.__add_unique_id_to_job_dir(self.job_dir)
+        source = os.path.join(XPConfig.queue_dir, self.job_dir)
+        destination = os.path.join(XPConfig.work_dir, self.new_job_dir)
+        logger.info(f'Copy job #{self.job_dir} to {os.path.join(XPConfig.work_dir, self.new_job_dir)}')
+        shutil.copytree(source, destination, ignore=_logpath)
+        # copy_tree(source, destination)
+        os.sync()
+        # time.sleep(5)
         pass
+
+    def __add_unique_id_to_job_dir(self, job_dir):
+        job_dir = f'{SignalMan.signal_id.hex}_{job_dir}'
+        return job_dir
 
     def get_job(self):
         if len(self.job_list) > 1:
@@ -204,14 +290,19 @@ class JobRunner:
         pass
 
     def setup_job(self):
+        self.__copy_job_to_work_dir()
+        """ Add remove old files and directory tree """
+        self.env.setup(os.path.join(XPConfig.work_dir, self.new_job_dir))
         pass
 
     def run_job(self):
         logger.info(f'Starting job #{self.job_dir}')
+        self.env.run()
         pass
 
     def finish_job(self):
         logger.info(f'Finishing job #{self.job_dir}')
+        self.env.reset()
         self.job_dir = ''
         self.job_list = []
         self._reset()
@@ -226,15 +317,15 @@ class Runner:
     def __init__(self,
                  sleep_time_range=(25, 90),
                  verbose=1):
-
         self.root_dir = XPConfig.root_dir
         self.done_dir = XPConfig.done_dir
         self.queue_dir = XPConfig.queue_dir
         self.in_progress_dir = XPConfig.work_dir
         self.xperiments = XPConfig.xperiments
-
+        """ Checking if directories exist or create """
         self.__setup()
         self.semaphore = SignalMan(sleep_time_range=sleep_time_range)
+        """ Logger initialization """
         self.log_name = f'{self.semaphore.id.hex}.log'
         self._set_logging(verbose)
         logger.info(f'Started...')
@@ -245,6 +336,7 @@ class Runner:
     def __check_create(self, path_dir):
         if not os.path.exists(path_dir):
             os.makedirs(path_dir)
+            logger.info(f'Directory {path_dir} not found. Directory created.')
         pass
 
     @abstractmethod
@@ -275,7 +367,6 @@ class Runner:
 
     def run(self):
         while True:
-
             if self.semaphore.is_wait_flag():
                 self.semaphore.wait()
             else:
@@ -286,6 +377,7 @@ class Runner:
                         self.worker.setup_job()
                         self.semaphore.remove_wait_flag()
                         self.worker.run_job()
+                        sys.exit(0)
                         self.worker.finish_job()
                     else:
                         self.semaphore.remove_wait_flag()
